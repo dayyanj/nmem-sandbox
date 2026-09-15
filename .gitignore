@@ -1,0 +1,14 @@
+artifacts/
+__pycache__/
+*.pyc
+*.mp4
+*.log
+models/
+checkpoints*/
+videos/
+venv/
+.venv/
+.env
+*.egg-info/
+# internal migration/appliance notes (not for public repo)
+/APPLIANCE-NOTE.md
