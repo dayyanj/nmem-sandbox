@@ -56,6 +56,55 @@ def phash_of(png_bytes: bytes) -> str | None:
         return None
 
 
+# Browser chrome (tab strip + omnibox) is a roughly FIXED pixel height regardless of window size — so a
+# purely proportional crop under-cuts it at small resolutions, leaving lit toolbar in the measured region
+# and masking a black viewport. Crop max(proportional, these pixel floors), clamped so it can't eat the
+# whole frame.
+_TOP_CHROME_PX = 90     # tab strip + URL bar
+_BOTTOM_CHROME_PX = 28  # WM/taskbar strip
+
+
+def is_blank(png_bytes: bytes, *, dark_frac: float = 0.97, dark_level: int = 10,
+             top_chrome: float = 0.12, bottom_chrome: float = 0.05, side_chrome: float = 0.02) -> bool:
+    """True when the page CONTENT AREA is (near-)entirely BLACK — the wedged-compositor failure where
+    Chromium's window + tab/URL bar + the WM bar still render but the viewport paints nothing. Keyboard
+    reloads can't fix that (the wedge is below the page), so the session loop treats a persistent blank
+    frame as a trigger to run its recovery.
+
+    We threshold the CONTENT REGION, not the whole frame: the tab strip + omnibox (~top) and the WM
+    toolbar (~bottom) still render on a black page, and that lit chrome is enough to keep a whole-frame
+    check under the 0.97 threshold — so recovery would never fire. Chrome is a roughly FIXED pixel
+    height, so the crop is max(proportional, a pixel floor) and clamped, keeping detection robust across
+    resolutions. Distinguished from a merely dark page (dark-mode site, a video) two ways: the threshold
+    is PURE-black (`dark_level`=10), not dark-grey — a wedged compositor paints literal 0,0,0, whereas a
+    real dark theme sits at luminance ~16-24+; and almost the whole viewport must clear it — a real page
+    (even sparse, even dark) still has visible content. Cheap PIL check; returns False on any error so it
+    never causes a false restart."""
+    if not png_bytes:
+        return False
+    try:
+        im = Image.open(io.BytesIO(png_bytes)).convert("L")
+        w, h = im.size
+        if w < 4 or h < 4:
+            return False
+        # Crop the browser/desktop chrome so only the page viewport is measured. Pixel floors cover
+        # fixed-height chrome at small resolutions; the clamps keep the crop from eating the whole frame.
+        top = min(max(int(h * top_chrome), _TOP_CHROME_PX), h // 3)
+        bot = min(max(int(h * bottom_chrome), _BOTTOM_CHROME_PX), h // 6)
+        side = min(int(w * side_chrome), w // 8)
+        box = (side, top, w - side, h - bot)
+        if box[2] - box[0] < 2 or box[3] - box[1] < 2:   # degenerate crop → measure whole frame
+            box = (0, 0, w, h)
+        im = im.crop(box).resize((64, 36), Image.BILINEAR)
+    except Exception:  # noqa: BLE001
+        return False
+    px = list(im.getdata())
+    if not px:
+        return False
+    dark = sum(1 for p in px if p <= dark_level)
+    return (dark / len(px)) >= dark_frac
+
+
 def frame_path(session_id: str, step_i: int) -> str:
     return os.path.join(ARTIFACT_DIR, session_id, f"frame_{step_i}.jpg")
 

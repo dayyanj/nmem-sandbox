@@ -39,6 +39,32 @@ STALL_GATE = os.environ.get("SANDBOX_STALL_GATE", "shadow").strip().lower()
 STALL_MATERIAL_HAMMING = int(os.environ.get("SANDBOX_STALL_MATERIAL_HAMMING", "6"))
 STALL_KILL_AT = int(os.environ.get("SANDBOX_STALL_KILL_AT", "6"))
 
+# Self-heal a wedged/black-screen browser: after this many CONSECUTIVE all-black frames, restart Chromium
+# (bounded per session) rather than let the agent thrash ctrl+r against a dead compositor. Unlike the
+# stall gate this is an ACTIVE recovery, not telemetry. Set SANDBOX_BROWSER_HEAL=0 to disable.
+BROWSER_HEAL = os.environ.get("SANDBOX_BROWSER_HEAL", "1").strip().lower() not in ("0", "false", "no", "off")
+BLANK_HEAL_AFTER = int(os.environ.get("SANDBOX_BLANK_HEAL_AFTER", "3"))
+MAX_HEALS_PER_SESSION = int(os.environ.get("SANDBOX_MAX_HEALS", "2"))
+
+
+def _heal_decision(blank: bool, blank_run: int, heals: int) -> str:
+    """'restart' when the viewport has been PURE-black for BLANK_HEAL_AFTER consecutive frames and we
+    still have restart budget, else 'none'. A pure function so the threshold logic is unit-testable.
+
+    Why a plain bounded restart, not a cleverer probe: a pixel+xdotool harness can't observe renderer
+    state (tabs aren't X windows, keystrokes aren't ack'd), so any 'is it really dead' probe is itself
+    unreliable. Instead we lean on what IS reliable: `frames.is_blank` only fires on a ~fully PURE-black
+    viewport (dark_level=10), which already excludes real dark-theme sites (luminance ~16-24+); and we
+    require BLANK_HEAL_AFTER consecutive blank frames — during which the MODEL has itself had that many
+    steps to reload/navigate out. If it's still pure-black after all that, the view is unusable to the
+    agent whether it's a wedge or a rare all-black page, so a bounded restart (→ about:blank, model
+    re-navigates) is the cheap, safe fallback. The ROOT cause — renderer crash from /dev/shm exhaustion —
+    is fixed upstream (--disable-dev-shm-usage in entrypoint.sh + desktop._CHROMIUM_CMD); this is the net.
+    """
+    if not blank or blank_run < BLANK_HEAL_AFTER:
+        return "none"
+    return "restart" if heals < MAX_HEALS_PER_SESSION else "none"
+
 
 class Session:
     def __init__(self, task: str, mode: str = "read_only", max_steps: int = 20,
@@ -58,6 +84,10 @@ class Session:
         self.stall = 0
         self.shadow_would_kill_at: int | None = None
         self.gate_events: list[dict] = []
+        # Self-heal: consecutive pure-black frames + how many times we've restarted the browser this
+        # session (bounded by MAX_HEALS_PER_SESSION).
+        self.blank_run = 0
+        self.heals = 0
 
     def public(self) -> dict:
         return {"id": self.id, "task": self.task, "mode": self.mode,
@@ -216,7 +246,45 @@ async def run_session(session: Session):
                 return
             if time.monotonic() > deadline:
                 break                  # salvage below rather than lose the work
+            # ── Observe, self-healing a wedged browser ── A crashed Chromium compositor paints an all-
+            # BLACK viewport (the window + WM bar still render). If the viewport has been PURE-black for
+            # BLANK_HEAL_AFTER consecutive frames — the model has had that many steps to reload/navigate
+            # out and hasn't — restart Chromium (bounded), re-observe WITHIN this step so the model gets
+            # to act on the recovered about:blank, and tell it to re-navigate. See _heal_decision for why
+            # a plain bounded restart (not a cleverer, unobservable probe) is the right call here.
             img = await asyncio.to_thread(desktop.screenshot)
+            if BROWSER_HEAL:
+                blank = frames.is_blank(img)
+                session.blank_run = session.blank_run + 1 if blank else 0
+                if _heal_decision(blank, session.blank_run, session.heals) == "restart":
+                    session.heals += 1
+                    healed = await asyncio.to_thread(desktop.restart_browser)
+                    session.gate_events.append({"i": i, "action": "browser-restart",
+                                                "blank_run": session.blank_run, "ok": bool(healed)})
+                    # Reset the run either way so we re-accumulate before the next attempt (bounded by
+                    # MAX_HEALS) rather than firing every frame, giving the model steps in between.
+                    session.blank_run = 0
+                    if healed:
+                        log.warning("self-heal session=%s restarted browser at step=%d (heal %d/%d)",
+                                    session.id, i, session.heals, MAX_HEALS_PER_SESSION)
+                        session.stall = 0        # fresh browser = new baseline; don't carry a stale run
+                        prev_phash = None
+                        prev_judgeable = False
+                        # Restart dropped us to about:blank — pre-restart actions are moot. Clear the loop
+                        # detector (else _nudge_for reads the stale run) and tell the model to re-navigate.
+                        recent.clear()
+                        history.append(f"step {i}: [browser was wedged — restarted; now at about:blank, "
+                                       f"re-open the site you need]")
+                        await asyncio.sleep(1.0)
+                        img = await asyncio.to_thread(desktop.screenshot)   # re-observe within the step
+                    else:
+                        # Relaunch failed — do NOT claim about:blank. Record it honestly and let the
+                        # remaining heal budget retry on subsequent blank frames; the salvage path handles
+                        # a session that never recovers.
+                        log.error("self-heal session=%s browser restart FAILED at step=%d (heal %d/%d)",
+                                  session.id, i, session.heals, MAX_HEALS_PER_SESSION)
+                        history.append(f"step {i}: [browser recovery attempted but the browser did not "
+                                       f"come back — the screen may still be blank]")
             last_img = img
             cur_phash = frames.phash_of(img)
 

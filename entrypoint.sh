@@ -31,10 +31,14 @@ echo "[sandbox] desktop ready (DISPLAY=:99, ${SCREEN_W}x${SCREEN_H}); noVNC http
 
 # Start a maximized browser so the agent always has something to drive.
 # --test-type suppresses the "unsupported flag --no-sandbox" infobar.
+# --disable-dev-shm-usage: a container's default /dev/shm is only 64 MB; Chromium exhausts it and the
+#   renderer crashes into a PERSISTENT BLACK SCREEN that ctrl+r can't recover (observed live). Writing
+#   shared memory to /tmp instead avoids it. --disable-features drops the noisy Lens overlay.
+# KEEP THESE FLAGS IN SYNC with harness/desktop.py:_CHROMIUM_CMD (the self-heal relaunch).
 echo "[sandbox] launching Chromium"
-chromium --no-sandbox --test-type --disable-gpu --no-first-run \
-    --no-default-browser-check --disable-infobars --start-maximized \
-    --window-position=0,0 --window-size="${SCREEN_W},${SCREEN_H}" \
+chromium --no-sandbox --test-type --disable-gpu --disable-dev-shm-usage --no-first-run \
+    --no-default-browser-check --disable-infobars --disable-features=LensOverlay,LensStandalone \
+    --start-maximized --window-position=0,0 --window-size="${SCREEN_W},${SCREEN_H}" \
     about:blank >/tmp/chromium.log 2>&1 &
 sleep 3
 
