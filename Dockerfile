@@ -21,9 +21,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         fonts-liberation dbus-x11 ca-certificates curl procps net-tools \
     && rm -rf /var/lib/apt/lists/*
 
-# Harness runtime deps (used from Phase 2 onward)
+# Harness runtime deps (used from Phase 2 onward).
+# playwright drives the SAME visible Chromium over CDP for the semantic (accessibility) layer
+# (harness/browser.py). We attach to the system chromium via connect_over_cdp, so NO `playwright
+# install` browser download is needed — the pip package (its bundled Node driver) is enough.
 RUN pip3 install --no-cache-dir --break-system-packages \
-        fastapi "uvicorn[standard]" httpx pillow
+        fastapi "uvicorn[standard]" httpx pillow playwright
 
 RUN useradd -m -s /bin/bash sandbox
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh

@@ -8,9 +8,14 @@ import os
 import time
 import uuid
 
-from . import desktop, frames, recorder, vlm
+from . import browser, desktop, frames, recorder, vlm
 
 log = logging.getLogger(__name__)
+
+# Semantic (CDP/Playwright) layer: give the model a ref-tagged accessibility map + intent actions
+# (click_ref/type_ref/click_role/click_text) alongside the pixel path. Resolved once — if playwright
+# isn't installed or the flag is off, this is False and the loop behaves exactly as pixel-only before.
+_SEMANTIC = browser.available()
 
 ARTIFACT_DIR = os.environ.get("ARTIFACT_DIR", "/home/sandbox/artifacts")
 
@@ -123,13 +128,37 @@ async def _goto(text: str):
     await asyncio.to_thread(desktop.key, "Return")
 
 
-async def _execute(action: dict):
-    """Run one action on the desktop (in a thread — xdotool is blocking)."""
+async def _execute(action: dict) -> str | None:
+    """Run one action. Returns None on success, or a short error string for a SEMANTIC action that
+    didn't land (so the loop records it and the model can retry via the pixel path). Pixel/xdotool
+    actions are best-effort and always return None (they can't report failure)."""
     t = action.get("type")
     x, y = _num(action.get("x")), _num(action.get("y"))
+    # ── Semantic (CDP) actions: act by intent. On failure return the reason (→ model falls back). ──
+    if t == "click_ref":
+        ok, why = await browser.click_ref(str(action.get("ref", "")))
+        return None if ok else why
+    if t == "type_ref":
+        ok, why = await browser.type_ref(str(action.get("ref", "")), str(action.get("text", "")),
+                                         submit=bool(action.get("submit")))
+        return None if ok else why
+    if t == "click_role":
+        ok, why = await browser.click_role(str(action.get("role", "")), str(action.get("name", "")))
+        return None if ok else why
+    if t == "click_text":
+        ok, why = await browser.click_text(str(action.get("text", "")))
+        return None if ok else why
     if t in ("search", "navigate", "goto"):
+        # An explicit URL goes through the reliable CDP page.goto when the semantic layer is up; a bare
+        # search query (or any failure) uses the pixel address-bar dance (real default search engine).
+        url = str(action.get("url") or "").strip()
+        if _SEMANTIC and t != "search" and url:
+            ok, _why = await browser.goto(url)
+            if ok:
+                return None
         await _goto(action.get("query") or action.get("url") or action.get("text", ""))
-    elif t == "click":
+        return None
+    if t == "click":
         await asyncio.to_thread(desktop.click, x, y)
     elif t == "double_click":
         await asyncio.to_thread(desktop.double_click, x, y)
@@ -148,7 +177,9 @@ async def _execute(action: dict):
 
 
 def _sig(a: dict):
-    return (a.get("type"), a.get("keys"), a.get("text"), a.get("x"), a.get("y"))
+    # Include the semantic targets (ref/role/name) so distinct intent-actions aren't seen as repeats.
+    return (a.get("type"), a.get("keys"), a.get("text"), a.get("x"), a.get("y"),
+            a.get("ref"), a.get("role"), a.get("name"))
 
 
 def _searchish(a: dict) -> bool:
@@ -220,6 +251,13 @@ def _brief(action: dict) -> str:
         return f"{t}({str(action.get('query') or action.get('url') or action.get('text',''))[:50]!r})"
     if t in ("click", "double_click", "right_click", "move", "scroll"):
         return f"{t}({action.get('x')},{action.get('y')})"
+    if t in ("click_ref", "type_ref"):
+        txt = f",{str(action.get('text',''))[:30]!r}" if t == "type_ref" else ""
+        return f"{t}({action.get('ref')}{txt})"
+    if t == "click_role":
+        return f"click_role({action.get('role')},{str(action.get('name',''))[:30]!r})"
+    if t == "click_text":
+        return f"click_text({str(action.get('text',''))[:30]!r})"
     if t == "type":
         return f"type({str(action.get('text',''))[:40]!r})"
     if t == "key":
@@ -321,13 +359,32 @@ async def run_session(session: Session):
                     log.info("stall-gate[shadow] session=%s WOULD salvage at step=%d (stall=%d)",
                              session.id, i, session.stall)
 
+            # Semantic map: the page's ref-tagged accessibility tree, so the model can act by intent
+            # (click_ref/type_ref) instead of guessing pixels. Best-effort — None when the layer is
+            # unavailable or the page has no tree, in which case the model just gets the screenshot.
+            semantic = ""
+            if _SEMANTIC:
+                try:
+                    snap = await browser.snapshot()
+                    if snap:
+                        dlg = snap.get("dialog")
+                        note = (f"NOTE: a JavaScript {dlg['type']} dialog appeared and was auto-handled "
+                                f"(alerts accepted, confirm/prompt dismissed): {dlg['message']!r}\n"
+                                if dlg else "")
+                        if snap.get("tree"):
+                            semantic = f"{note}page: {snap.get('url','')}\n{snap['tree']}"
+                        elif note:
+                            semantic = note
+                except Exception as e:  # noqa: BLE001 — never let the semantic layer break a step
+                    log.debug("snapshot failed session=%s step=%d: %s", session.id, i, e)
+
             # The behavioural loop-breaker: a soft, escalating hint (never a kill) that pushes a
             # genuinely-stuck session to conclude. Grounded in repetition, not phash — see _nudge_for.
             nudge = _nudge_for(recent)
             try:
                 decision = await vlm.next_action(task, history, img,
                                                  steps_remaining=session.max_steps - i,
-                                                 nudge=nudge)
+                                                 nudge=nudge, semantic=semantic)
             except Exception as e:  # a VLM hiccup shouldn't kill the session
                 session.steps.append({"i": i, "error": f"vlm: {e}", **({"frame": kf} if kf else {})})
                 await asyncio.sleep(1.0)
@@ -350,9 +407,20 @@ async def run_session(session: Session):
                 await asyncio.sleep(0.5)
                 continue
 
-            await _execute(action)
+            err = await _execute(action)
             recent.append(action)
-            history.append(f"step {i}: {_brief(action)} — {decision.get('reasoning','')[:80]}")
+            # Audit: a ref is ephemeral, so persist WHAT that ref pointed at (its map line: role + name)
+            # alongside the action, so the durable JSON records the real target, not just "f1e6".
+            if atype in ("click_ref", "type_ref") and semantic:
+                ref = str(action.get("ref", ""))
+                tgt = next((ln.strip() for ln in semantic.splitlines() if f"[ref={ref}]" in ln), "")
+                if tgt:
+                    session.steps[-1]["target"] = tgt[:180]
+            note = f"step {i}: {_brief(action)} — {decision.get('reasoning','')[:80]}"
+            if err:                       # a semantic action that didn't land — the model sees this and
+                note += f"  [FAILED: {err}; try a pixel click or a different element]"
+                session.steps[-1]["exec_error"] = err
+            history.append(note)
             prev_judgeable = (atype != "wait")   # a deliberate wait isn't a progress attempt
             await asyncio.sleep(0.6)  # let the UI settle before the next screenshot
 

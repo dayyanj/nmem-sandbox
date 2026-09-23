@@ -21,6 +21,11 @@ _ENV = {**os.environ, "DISPLAY": DISPLAY}
 _CHROMIUM_CMD = ["chromium", "--no-sandbox", "--test-type", "--disable-gpu", "--disable-dev-shm-usage",
                  "--no-first-run", "--no-default-browser-check", "--disable-infobars",
                  "--disable-features=LensOverlay,LensStandalone",
+                 # CDP port for the semantic layer — MUST match entrypoint.sh so the self-heal relaunch
+                 # keeps Playwright able to reattach. Loopback-only; Chrome 136+ needs a non-default
+                 # --user-data-dir for remote debugging.
+                 "--remote-debugging-port=9222", "--remote-debugging-address=127.0.0.1",
+                 "--remote-allow-origins=*", "--user-data-dir=/home/sandbox/.chromium-cdp",
                  "--start-maximized", "--window-position=0,0", f"--window-size={SCREEN_W},{SCREEN_H}",
                  "about:blank"]
 
@@ -62,6 +67,13 @@ def restart_browser(timeout: float = 25.0) -> bool:
         time.sleep(1.5)
         subprocess.run(["pkill", "-KILL", "-f", "chromium"], env=_ENV, capture_output=True, timeout=10.0)
         time.sleep(0.8)
+        # A -KILL leaves the profile's Singleton* locks behind; the fresh Chromium can refuse to start
+        # ("profile appears to be in use") until they're cleared. Safe to remove — the old process is dead.
+        for lock in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
+            try:
+                os.remove(os.path.join("/home/sandbox/.chromium-cdp", lock))
+            except OSError:
+                pass
         subprocess.Popen(_CHROMIUM_CMD, env=_ENV,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:  # noqa: BLE001

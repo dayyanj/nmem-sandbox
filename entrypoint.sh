@@ -34,10 +34,16 @@ echo "[sandbox] desktop ready (DISPLAY=:99, ${SCREEN_W}x${SCREEN_H}); noVNC http
 # --disable-dev-shm-usage: a container's default /dev/shm is only 64 MB; Chromium exhausts it and the
 #   renderer crashes into a PERSISTENT BLACK SCREEN that ctrl+r can't recover (observed live). Writing
 #   shared memory to /tmp instead avoids it. --disable-features drops the noisy Lens overlay.
+# --remote-debugging-port: the loopback CDP port the semantic layer (harness/browser.py, Playwright)
+#   attaches to for accessibility-tree reads + intent-level (ref/role) interaction. Chrome 136+ REQUIRES
+#   a non-default --user-data-dir to enable remote debugging, so we pin one. Port is localhost-only and
+#   NOT EXPOSEd. --remote-allow-origins=* lets the local Playwright driver open the CDP websocket.
 # KEEP THESE FLAGS IN SYNC with harness/desktop.py:_CHROMIUM_CMD (the self-heal relaunch).
 echo "[sandbox] launching Chromium"
 chromium --no-sandbox --test-type --disable-gpu --disable-dev-shm-usage --no-first-run \
     --no-default-browser-check --disable-infobars --disable-features=LensOverlay,LensStandalone \
+    --remote-debugging-port=9222 --remote-debugging-address=127.0.0.1 --remote-allow-origins=* \
+    --user-data-dir=/home/sandbox/.chromium-cdp \
     --start-maximized --window-position=0,0 --window-size="${SCREEN_W},${SCREEN_H}" \
     about:blank >/tmp/chromium.log 2>&1 &
 sleep 3
