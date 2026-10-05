@@ -1,4 +1,4 @@
-"""FastAPI sandbox service — the API DJ-AI (or a curl) drives the desktop through.
+"""FastAPI sandbox service — the API an agent (or a curl) drives the desktop through.
 
   POST /session {task, mode, max_steps, wall_clock_s} -> {session_id}
   GET  /session/{id}                                   -> full session state
@@ -18,7 +18,7 @@ from pydantic import BaseModel
 from . import frames
 from .agent import Session, run_session
 
-app = FastAPI(title="michelle-sandbox-harness")
+app = FastAPI(title="nmem-sandbox-harness")
 
 _sessions: dict[str, Session] = {}
 _tasks: dict[str, asyncio.Task] = {}

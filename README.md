@@ -1,5 +1,7 @@
 # nmem-sandbox
 
+> ⚠️ **Experimental — under active development.** This project is mid-build: APIs, schemas, and behaviour may change without notice, and it is not yet recommended for production use.
+
 The **canonical, LLM-agnostic computer-use sandbox** for nmem agents — a headless Linux desktop a
 vision model drives by `screenshot → action → xdotool`. The agent POSTs an objective and polls; it
 never runs the loop itself. This is the appliance's sandbox **server** (the client is generic:

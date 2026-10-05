@@ -3,7 +3,7 @@
 The model sees the current screenshot and the task, and returns ONE next action
 as JSON. Coordinates are normalized [0,1000] per axis. NB: this convention was
 verified for Qwen3.8-27B; Gemma 4's spatial grounding ACCURACY in [0,1000] is
-still being calibrated (michelle-ai bring-up) — the convention is instructed
+still being calibrated (during model bring-up) — the convention is instructed
 explicitly in the system prompt, so mismatch is an accuracy question, not a
 format one. The parser is deliberately tolerant — the model's JSON shape varies
 (e.g. {"x":N,"y":N} vs {"x":[N,N]}).

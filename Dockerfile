@@ -1,4 +1,4 @@
-# DJ-AI computer-use sandbox — a headless Linux desktop the VLM drives.
+# Computer-use sandbox — a headless Linux desktop the VLM drives.
 # Debian (real chromium .deb, no snap). Xvfb desktop + fluxbox + input/capture
 # tooling + x11vnc/noVNC for live viewing. The control-loop harness (Phase 2)
 # is COPYed in and exec'd by the entrypoint; Phase 1 just brings up the desktop.

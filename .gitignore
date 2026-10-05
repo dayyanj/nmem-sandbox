@@ -12,3 +12,9 @@ venv/
 *.egg-info/
 # internal migration/appliance notes (not for public repo)
 /APPLIANCE-NOTE.md
+
+# Claude Code local guidance (not public)
+CLAUDE.md
+
+# Internal working docs — never publish to the public repo.
+.dev_docs/
