@@ -56,6 +56,33 @@ MAX_HEALS_PER_SESSION = int(os.environ.get("SANDBOX_MAX_HEALS", "2"))
 # Flag-gated — off → session.structured stays None (byte-identical). Fail-open: never fails the session.
 STRUCTURED_RESULT = os.environ.get("SANDBOX_STRUCTURED_RESULT", "0").strip().lower() not in ("0", "false", "no", "off")
 
+# pursue_knowledge-V2 #1 (Michelle): MID-LOOP LANDSCAPE-ROUTING — the "Canyon Effect" fix. Periodically,
+# before sinking the next several steps into the current branch, a dedicated route_check call maps the
+# search space (candidate branches by likelihood) and judges whether the current trajectory is still the
+# best route or should pivot. TRAJECTORY/branch-based, deliberately distinct from _nudge_for (which is
+# repetition-based): the canyon trap is being deep in a CONVINCING branch that's wrong, which looks like
+# progress and so never trips a repetition nudge. On "pivot", the recommendation is injected into the
+# next next_action as a route hint; on "aligned", nothing is injected. Flag-gated — off → no route_check
+# call and route="" into next_action (byte-identical behaviour). Fail-open: a failed/garbage check =
+# aligned, so it never injects a spurious pivot.
+#   SANDBOX_ROUTE_CHECK      — enable (default off)
+#   SANDBOX_ROUTE_EVERY      — steps between route checks (default 5)
+#   SANDBOX_ROUTE_MIN_STEP   — earliest step / min actions-taken before the first check (default 4)
+def _int_env(name: str, default: int) -> int:
+    """Parse an int env var, falling back to the default on a missing/blank/garbage value — so a
+    malformed override can't crash module import (and take down the sandbox) when the feature is off."""
+    try:
+        return int(os.environ.get(name, "").strip() or default)
+    except (TypeError, ValueError):
+        return default
+
+
+ROUTE_CHECK = os.environ.get("SANDBOX_ROUTE_CHECK", "0").strip().lower() not in ("0", "false", "no", "off")
+ROUTE_EVERY = max(1, _int_env("SANDBOX_ROUTE_EVERY", 5))
+ROUTE_MIN_STEP = max(1, _int_env("SANDBOX_ROUTE_MIN_STEP", 4))
+# Don't route in the conclude-pressure zone — when this few steps remain, the loop already pushes "done".
+ROUTE_CONCLUDE_GUARD = 4
+
 
 async def _maybe_structured(session, task: str, history: list[str], image) -> None:
     if not STRUCTURED_RESULT or image is None:
@@ -104,6 +131,8 @@ class Session:
         self.stall = 0
         self.shadow_would_kill_at: int | None = None
         self.gate_events: list[dict] = []
+        # Mid-loop landscape-routing (#1): every route_check verdict + whether it injected a pivot.
+        self.route_events: list[dict] = []
         # Self-heal: consecutive pure-black frames + how many times we've restarted the browser this
         # session (bounded by MAX_HEALS_PER_SESSION).
         self.blank_run = 0
@@ -115,7 +144,7 @@ class Session:
                 "error": self.error,
                 "steps": self.steps, "n_steps": len(self.steps), "video": self.video,
                 "stall": self.stall, "shadow_would_kill_at": self.shadow_would_kill_at,
-                "gate_events": self.gate_events}
+                "gate_events": self.gate_events, "route_events": self.route_events}
 
 
 def _num(v, default: float = 0.0) -> float:
@@ -261,6 +290,44 @@ def _nudge_for(recent: list[dict]) -> str:
     return base
 
 
+def _should_route(i: int, last_route_step: int, steps_remaining: int | None,
+                  nudge: str, n_actions: int) -> bool:
+    """Whether to run a mid-loop route_check on this step (pure, so the cadence is unit-testable).
+    Gated so routing is cheap and non-redundant: never when the flag is off; never when a repetition
+    nudge already owns the step (don't stack two hints); only once there's a real trajectory to assess
+    (>= ROUTE_MIN_STEP actions taken AND step index past ROUTE_MIN_STEP); not in the conclude-pressure
+    zone (the step budget already forces "done" there); and then no more than once per ROUTE_EVERY steps."""
+    if not ROUTE_CHECK:
+        return False
+    if nudge:                                   # a repetition nudge is the stronger, more specific signal
+        return False
+    if n_actions < ROUTE_MIN_STEP or i < ROUTE_MIN_STEP:
+        return False
+    if steps_remaining is not None and steps_remaining <= ROUTE_CONCLUDE_GUARD:
+        return False
+    return (i - last_route_step) >= ROUTE_EVERY
+
+
+def _route_hint_text(verdict: dict) -> str:
+    """Render a pivot verdict as a hint for next_action. Empty when aligned or when there's nothing
+    actionable (no recommendation and no alternative branch), so we never inject vacuous noise."""
+    if verdict.get("aligned", True):
+        return ""
+    rec = (verdict.get("recommendation") or "").strip()
+    most = (verdict.get("most_promising") or "").strip()
+    cur = (verdict.get("current") or "").strip()
+    if not rec and not most:
+        return ""
+    head = "TRAJECTORY CHECK: the branch you are on"
+    head += f" ({cur})" if cur else ""
+    head += " may not be the most promising route to the goal."
+    if most:
+        head += f" A more likely place for the answer is {most}."
+    head += f" Re-evaluate before continuing — consider pivoting now: {rec}" if rec else \
+            " Re-evaluate whether to pivot there before sinking more steps into the current branch."
+    return head
+
+
 def _brief(action: dict) -> str:
     t = action.get("type", "?")
     if t in ("search", "navigate", "goto"):
@@ -290,6 +357,7 @@ async def run_session(session: Session):
     last_img: bytes | None = None
     prev_phash: str | None = None      # immediately-preceding observed frame's perceptual hash
     prev_judgeable = False             # did the previous step execute a progress-judgeable action?
+    last_route_step = -1               # step index of the last mid-loop route_check (#1)
     stalled = False                    # broke out because the stall gate fired (vs the step ceiling)
     rec = recorder.start(session.video)
     deadline = time.monotonic() + session.wall_clock_s
@@ -397,10 +465,32 @@ async def run_session(session: Session):
             # The behavioural loop-breaker: a soft, escalating hint (never a kill) that pushes a
             # genuinely-stuck session to conclude. Grounded in repetition, not phash — see _nudge_for.
             nudge = _nudge_for(recent)
+
+            # Mid-loop landscape-routing (#1): periodically re-evaluate the SEARCH TOPOLOGY before sinking
+            # the next several steps. A dedicated route_check maps candidate branches by likelihood and
+            # judges align-vs-pivot; on pivot its recommendation is injected as a route hint into the next
+            # action. Separate from nudge (repetition) — this catches the "canyon" trap of being deep in a
+            # convincing-but-wrong branch. Fail-open: any error → aligned → no hint.
+            route = ""
+            steps_remaining = session.max_steps - i
+            if _should_route(i, last_route_step, steps_remaining, nudge, len(recent)):
+                last_route_step = i
+                try:
+                    verdict = await vlm.route_check(task, history, img, semantic=semantic)
+                    route = _route_hint_text(verdict)
+                    session.route_events.append({"i": i, "aligned": verdict.get("aligned", True),
+                                                 "current": verdict.get("current", ""),
+                                                 "most_promising": verdict.get("most_promising", ""),
+                                                 "pivoted": bool(route)})
+                    if route:
+                        log.info("route-check session=%s step=%d PIVOT: %s -> %s", session.id, i,
+                                 verdict.get("current", "?"), verdict.get("most_promising", "?"))
+                except Exception as e:  # noqa: BLE001 — routing is additive; never break a step
+                    log.debug("route_check failed session=%s step=%d: %s", session.id, i, e)
             try:
                 decision = await vlm.next_action(task, history, img,
-                                                 steps_remaining=session.max_steps - i,
-                                                 nudge=nudge, semantic=semantic)
+                                                 steps_remaining=steps_remaining,
+                                                 nudge=nudge, semantic=semantic, route=route)
             except Exception as e:  # a VLM hiccup shouldn't kill the session
                 session.steps.append({"i": i, "error": f"vlm: {e}", **({"frame": kf} if kf else {})})
                 await asyncio.sleep(1.0)

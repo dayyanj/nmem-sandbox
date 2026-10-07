@@ -65,12 +65,13 @@ RULES OF ENGAGEMENT (non-negotiable):
 
 async def next_action(task: str, history: list[str], image_png: bytes,
                       steps_remaining: int | None = None, nudge: str = "",
-                      semantic: str = "") -> dict:
+                      semantic: str = "", route: str = "") -> dict:
     """Ask the VLM for the next action given the task, a text history, and the
     CURRENT screenshot only (we never resend past images — keeps context bounded).
     steps_remaining drives conclude-pressure; nudge is an optional loop-breaker;
     `semantic` is the current page's ref-tagged accessibility map (empty when the
-    semantic layer is unavailable — then only the pixel actions apply)."""
+    semantic layer is unavailable — then only the pixel actions apply); `route` is an
+    optional mid-loop trajectory hint from route_check (empty unless a pivot is advised)."""
     hist = "\n".join(history[-12:]) if history else "(none yet)"
     budget = ""
     if steps_remaining is not None:
@@ -82,9 +83,100 @@ async def next_action(task: str, history: list[str], image_png: bytes,
            f"or click_role/click_text):\n{semantic}" if semantic else "")
     user_text = (f"TASK: {task}\n\nActions so far:\n{hist}{budget}{sem}"
                  + (f"\n\n{nudge}" if nudge else "")
+                 + (f"\n\n{route}" if route else "")
                  + "\n\nHere is the current screen. Choose the next action.")
     content = await backends.chat_image(SYSTEM_PROMPT, user_text, image_png, max_tokens=400)
     return _parse_action(content)
+
+
+async def route_check(task: str, history: list[str], image_png: bytes, semantic: str = "") -> dict:
+    """Mid-loop landscape-routing (Michelle's pursue_knowledge-V2 ask #1): a periodic self-check that
+    maps the search space BEFORE the sunk cost of the next several steps. Distinct from _nudge_for,
+    which is repetition-based — THIS is TRAJECTORY/branch-based: it asks whether the current branch is
+    still the most likely place the answer lives, or whether to pivot. PROBABILISTIC, not descriptive —
+    it weighs candidate branches by likelihood rather than asserting one structure (the pre-flight-plan
+    trap Michelle rejected). One VLM call. Returns {branches, current, most_promising, aligned,
+    recommendation}; tolerant parse that FAILS OPEN (aligned=True → no pivot injected)."""
+    hist = "\n".join(history[-16:]) if history else "(no actions)"
+    sem = (f"\n\nSEMANTIC MAP of the current page:\n{semantic}" if semantic else "")
+    user_text = (
+        f"TASK: {task}\n\nYou have been pursuing this for several steps (your actions below, current "
+        f"screen attached). Before you sink more steps into the current branch, step back and MAP THE "
+        f"SEARCH SPACE — do NOT pick a click, just route:\n"
+        f"1. List the 2-4 plausible branches (sites, sections, link paths, or sources) where the answer "
+        f"could live, ordered by how LIKELY each is to actually contain it.\n"
+        f"2. Name which branch your CURRENT trajectory is on.\n"
+        f"3. Decide: is the current trajectory still the most promising route to the goal, or should you "
+        f"pivot to a different branch?\n"
+        f"This is a probabilistic sanity-check on your topology, not a commitment — you may be deep in a "
+        f"convincing branch that does not hold the answer (the \"canyon\" trap). Prefer pivoting early "
+        f"over sinking steps into a dead end.\n\n"
+        f"Return ONLY a JSON object, no prose, no markdown:\n"
+        f'{{"branches": ["<most likely>", "<next>", "..."], '
+        f'"current": "<the branch you are on now>", '
+        f'"most_promising": "<the branch most likely to hold the answer>", '
+        f'"aligned": <true if the current trajectory is still the best route, false if you should pivot>, '
+        f'"recommendation": "<if not aligned: the concrete pivot to make next; else empty>"}}\n\n'
+        f"Actions:\n{hist}{sem}")
+    content = await backends.chat_image(
+        "You are a careful research strategist. Assess the search trajectory honestly; prefer pivoting "
+        "early over sinking steps into a dead-end branch. Never fabricate.",
+        user_text, image_png, max_tokens=400)
+    return _parse_route(content)
+
+
+def _parse_route(content: str) -> dict:
+    """Tolerant parse of the route-check reply → {branches, current, most_promising, aligned,
+    recommendation}. FAILS OPEN: an unparseable reply (or a missing `aligned`) returns aligned=True so
+    no spurious pivot is injected — the loop then behaves as if no routing fired."""
+    _OPEN = {"branches": [], "current": "", "most_promising": "", "aligned": True, "recommendation": ""}
+    text = (content or "").strip()
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+    # Unlike _parse_action (which MUST recover an action even from a truncated reply), route_check is
+    # advisory — so an UNCLOSED <think> means the model was still reasoning and hadn't committed a
+    # verdict. Do NOT mine it for JSON: fail open rather than inject a pivot from unfinished reasoning.
+    if "<think>" in text:
+        return dict(_OPEN)
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[-1].rsplit("```", 1)[0]
+    obj = None
+    try:
+        obj = json.loads(text)
+    except json.JSONDecodeError:
+        m = re.search(r"\{.*\}", text, re.DOTALL)
+        if m:
+            try:
+                obj = json.loads(m.group(0))
+            except json.JSONDecodeError:
+                obj = None
+    if not isinstance(obj, dict):
+        return dict(_OPEN)
+    branches = obj.get("branches")
+    if isinstance(branches, str):
+        branches = [branches]
+    elif not isinstance(branches, list):
+        branches = []
+    # `aligned` fails OPEN: only an EXPLICIT false/no/0 (bool or recognised string) is a pivot; a bool
+    # True, an unrecognised/empty string, or a missing/garbage value all mean "stay" (no spurious pivot).
+    raw = obj.get("aligned")
+    if isinstance(raw, bool):
+        aligned = raw
+    elif isinstance(raw, str):
+        aligned = raw.strip().lower() not in ("false", "no", "0")
+    else:
+        aligned = True
+    # Only trust STRING free-text for the injected fields; a non-string (dict/list/number) is garbage —
+    # drop it to "" rather than stringify an object into a pivot instruction.
+    def _s(v, n):
+        return v.strip()[:n] if isinstance(v, str) else ""
+    return {
+        "branches": [s[:200] for s in (b for b in branches if isinstance(b, str)) if s.strip()][:4],
+        "current": _s(obj.get("current"), 200),
+        "most_promising": _s(obj.get("most_promising"), 200),
+        "aligned": aligned,
+        "recommendation": _s(obj.get("recommendation"), 300),
+    }
 
 
 async def summarize_done(task: str, history: list[str], image_png: bytes) -> str:
