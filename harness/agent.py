@@ -51,6 +51,20 @@ BROWSER_HEAL = os.environ.get("SANDBOX_BROWSER_HEAL", "1").strip().lower() not i
 BLANK_HEAL_AFTER = int(os.environ.get("SANDBOX_BLANK_HEAL_AFTER", "3"))
 MAX_HEALS_PER_SESSION = int(os.environ.get("SANDBOX_MAX_HEALS", "2"))
 
+# pursue_knowledge-V2 #2 (Michelle): at session end emit a STRUCTURED {sought, found, gaps} delta (one
+# extra VLM call) so the calling agent gets a reconciled result instead of prose it must re-synthesise.
+# Flag-gated — off → session.structured stays None (byte-identical). Fail-open: never fails the session.
+STRUCTURED_RESULT = os.environ.get("SANDBOX_STRUCTURED_RESULT", "0").strip().lower() not in ("0", "false", "no", "off")
+
+
+async def _maybe_structured(session, task: str, history: list[str], image) -> None:
+    if not STRUCTURED_RESULT or image is None:
+        return
+    try:
+        session.structured = await vlm.summarize_structured(task, history, image)
+    except Exception:  # noqa: BLE001 — structured summary is additive; never break the session
+        pass
+
 
 def _heal_decision(blank: bool, blank_run: int, heals: int) -> str:
     """'restart' when the viewport has been PURE-black for BLANK_HEAL_AFTER consecutive frames and we
@@ -81,6 +95,7 @@ class Session:
         self.wall_clock_s = wall_clock_s
         self.status = "queued"          # queued|running|done|blocked|aborted|timeout|max_steps|stalled|error
         self.result: str | None = None
+        self.structured: dict | None = None   # #2: {sought, found, gaps} when SANDBOX_STRUCTURED_RESULT on
         self.steps: list[dict] = []
         self.abort = False
         self.error: str | None = None
@@ -96,7 +111,8 @@ class Session:
 
     def public(self) -> dict:
         return {"id": self.id, "task": self.task, "mode": self.mode,
-                "status": self.status, "result": self.result, "error": self.error,
+                "status": self.status, "result": self.result, "structured": self.structured,
+                "error": self.error,
                 "steps": self.steps, "n_steps": len(self.steps), "video": self.video,
                 "stall": self.stall, "shadow_would_kill_at": self.shadow_would_kill_at,
                 "gate_events": self.gate_events}
@@ -398,6 +414,8 @@ async def run_session(session: Session):
             if atype == "done":
                 session.result = str(action.get("result", ""))
                 session.status = "done"
+                await _maybe_structured(session, task,
+                                        history + [f"done: {session.result[:200]}"], img)
                 return
             if atype == "ask_founder":
                 session.result = str(action.get("question", ""))
@@ -442,6 +460,7 @@ async def run_session(session: Session):
             if summary and len(summary) > 20:
                 session.result = prefix + summary
                 session.status = "done"
+                await _maybe_structured(session, task, history, simg)
             else:
                 session.status = fail_status
         except Exception as e:  # noqa: BLE001

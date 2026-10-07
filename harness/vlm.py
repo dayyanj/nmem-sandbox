@@ -103,6 +103,59 @@ async def summarize_done(task: str, history: list[str], image_png: bytes) -> str
     return (text or "").strip()
 
 
+async def summarize_structured(task: str, history: list[str], image_png: bytes) -> dict:
+    """Structured session result (Michelle's pursue_knowledge-V2 ask #2): return WHAT WAS SOUGHT, WHAT
+    WAS FOUND, and the GAPS/unconfirmed as JSON — so the calling agent gets a reconciled delta to act on
+    instead of prose it must re-synthesise. One call at session end. Tolerant: a non-JSON reply falls
+    back to {sought: task, found: <text>, gaps: []} so this never fails the session."""
+    hist = "\n".join(history[-16:]) if history else "(no actions)"
+    user_text = (
+        f"TASK: {task}\n\nBased on EVERYTHING you saw (your actions below and the final screen), return a "
+        f"STRUCTURED summary as ONLY a JSON object, no prose, no markdown:\n"
+        f'{{"sought": "<what the task was trying to find or learn, one line>", '
+        f'"found": "<the concrete findings, honestly and specifically>", '
+        f'"gaps": ["<each thing you could NOT confirm>", "..."]}}\n'
+        f"Be concrete; never invent facts; an empty gaps list is fine if nothing is unconfirmed.\n\n"
+        f"Actions:\n{hist}\n\nFinal screen is attached.")
+    text = await backends.chat_image(
+        "You are a careful research assistant. Return honest, structured JSON; never fabricate.",
+        user_text, image_png, max_tokens=700)
+    return _parse_structured(text, task)
+
+
+def _parse_structured(content: str, task: str) -> dict:
+    """Tolerant parse of the structured-summary reply → {sought, found, gaps}. Falls back to carrying the
+    raw text as `found` (never loses the knowledge) when the model didn't emit clean JSON."""
+    text = (content or "").strip()
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+    if "<think>" in text:
+        text = text[text.index("{"):] if "{" in text else ""
+    if text.startswith("```"):
+        text = text.split("\n", 1)[-1].rsplit("```", 1)[0]
+    obj = None
+    try:
+        obj = json.loads(text)
+    except json.JSONDecodeError:
+        m = re.search(r"\{.*\}", text, re.DOTALL)
+        if m:
+            try:
+                obj = json.loads(m.group(0))
+            except json.JSONDecodeError:
+                obj = None
+    if not isinstance(obj, dict):
+        return {"sought": task, "found": (content or "").strip(), "gaps": []}
+    gaps = obj.get("gaps")
+    if isinstance(gaps, str):
+        gaps = [gaps]
+    elif not isinstance(gaps, list):
+        gaps = []
+    return {
+        "sought": str(obj.get("sought") or task)[:500],
+        "found": str(obj.get("found") or "").strip(),
+        "gaps": [str(g)[:300] for g in gaps if str(g).strip()],
+    }
+
+
 def _parse_action(content: str) -> dict:
     """Extract {reasoning, action} from the model text, tolerant of format drift."""
     text = (content or "").strip()
