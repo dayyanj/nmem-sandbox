@@ -53,8 +53,9 @@ MAX_HEALS_PER_SESSION = int(os.environ.get("SANDBOX_MAX_HEALS", "2"))
 
 # pursue_knowledge-V2 #2 (Michelle): at session end emit a STRUCTURED {sought, found, gaps} delta (one
 # extra VLM call) so the calling agent gets a reconciled result instead of prose it must re-synthesise.
-# Flag-gated — off → session.structured stays None (byte-identical). Fail-open: never fails the session.
-STRUCTURED_RESULT = os.environ.get("SANDBOX_STRUCTURED_RESULT", "0").strip().lower() not in ("0", "false", "no", "off")
+# GRADUATED default-on 2026-10-10 (validated on Michelle: 100 full {sought,found,gaps} results / 3d, 88%,
+# consumed by computer_use.py, fail-open, no regression). Opt out with SANDBOX_STRUCTURED_RESULT=0.
+STRUCTURED_RESULT = os.environ.get("SANDBOX_STRUCTURED_RESULT", "1").strip().lower() not in ("0", "false", "no", "off")
 
 # pursue_knowledge-V2 #1 (Michelle): MID-LOOP LANDSCAPE-ROUTING — the "Canyon Effect" fix. Periodically,
 # before sinking the next several steps into the current branch, a dedicated route_check call maps the

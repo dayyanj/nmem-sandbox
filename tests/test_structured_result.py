@@ -34,14 +34,19 @@ def test_parse_drops_blank_gaps():
     assert out["gaps"] == ["real"]
 
 
-def test_flag_default_off():
-    assert A.STRUCTURED_RESULT is False
+def test_flag_graduated_default_on():
+    # GRADUATED default-on 2026-10-10 (validated on Michelle). Opt out with SANDBOX_STRUCTURED_RESULT=0.
+    assert A.STRUCTURED_RESULT is True
+    # opt-out semantics: an explicit falsey value still disables it (byte-identical off path)
+    assert ("0".strip().lower() not in ("0", "false", "no", "off")) is False
 
 
-def test_maybe_structured_noop_when_flag_off():
+def test_maybe_structured_noop_when_opted_out(monkeypatch):
     class _S:
         structured = None
     s = _S()
-    # flag off (default) → no VLM call, structured stays None (byte-identical)
+    calls = []
+    monkeypatch.setattr(A, "STRUCTURED_RESULT", False)   # explicit opt-out (graduated default is now on)
+    monkeypatch.setattr(A.vlm, "summarize_structured", lambda *a, **k: calls.append(1))
     asyncio.run(A._maybe_structured(s, "task", [], object()))
-    assert s.structured is None
+    assert s.structured is None and calls == []          # byte-identical off path: no VLM call at all
