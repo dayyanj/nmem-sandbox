@@ -156,6 +156,21 @@ def _num(v, default: float = 0.0) -> float:
         return default
 
 
+def _scroll_amount(action: dict, default: int = 3) -> int:
+    """Signed scroll clicks (>0 down, <0 up). The VLM frequently puts a DIRECTION WORD in `amount` (or a
+    separate `direction`), e.g. {"type":"scroll","amount":"down"}; `int("down")` then raised ValueError and
+    errored ~a third of pursue_knowledge sessions. Numeric (incl. numeric strings) passes through; a word
+    maps to a signed default ('up' -> negative, anything else -> down); junk -> default (down)."""
+    raw = action.get("amount")
+    if raw is None:
+        raw = action.get("direction", default)
+    try:
+        return int(float(raw))                            # OverflowError guards 'inf'/'1e309'
+    except (TypeError, ValueError, OverflowError):
+        words = f"{action.get('amount', '')} {action.get('direction', '')}".lower().split()
+        return -abs(default) if "up" in words else abs(default)   # whole-word (so 'unsupported' ≠ up)
+
+
 async def _goto(text: str):
     """Reliable one-shot address-bar entry: focus + select-all + type + Enter.
     Backs the compound 'search'/'navigate' actions so the model never has to
@@ -216,9 +231,9 @@ async def _execute(action: dict) -> str | None:
     elif t == "key":
         await asyncio.to_thread(desktop.key, str(action.get("keys", "")))
     elif t == "scroll":
-        await asyncio.to_thread(desktop.scroll, x, y, int(action.get("amount", 3)))
+        await asyncio.to_thread(desktop.scroll, x, y, _scroll_amount(action))
     elif t == "wait":
-        await asyncio.sleep(min(int(action.get("ms", 500)), 5000) / 1000.0)
+        await asyncio.sleep(min(_num(action.get("ms"), 500.0), 5000.0) / 1000.0)
 
 
 def _sig(a: dict):
