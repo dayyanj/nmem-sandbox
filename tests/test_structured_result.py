@@ -35,7 +35,7 @@ def test_parse_drops_blank_gaps():
 
 
 def test_flag_graduated_default_on():
-    # GRADUATED default-on 2026-10-10 (validated on Michelle). Opt out with SANDBOX_STRUCTURED_RESULT=0.
+    # GRADUATED default-on 2026-10-10 (validated on a reference deployment). Opt out with SANDBOX_STRUCTURED_RESULT=0.
     assert A.STRUCTURED_RESULT is True
     # opt-out semantics: an explicit falsey value still disables it (byte-identical off path)
     assert ("0".strip().lower() not in ("0", "false", "no", "off")) is False

@@ -90,12 +90,12 @@ async def next_action(task: str, history: list[str], image_png: bytes,
 
 
 async def route_check(task: str, history: list[str], image_png: bytes, semantic: str = "") -> dict:
-    """Mid-loop landscape-routing (Michelle's pursue_knowledge-V2 ask #1): a periodic self-check that
+    """Mid-loop landscape-routing (the pursue_knowledge-V2 ask #1): a periodic self-check that
     maps the search space BEFORE the sunk cost of the next several steps. Distinct from _nudge_for,
     which is repetition-based — THIS is TRAJECTORY/branch-based: it asks whether the current branch is
     still the most likely place the answer lives, or whether to pivot. PROBABILISTIC, not descriptive —
     it weighs candidate branches by likelihood rather than asserting one structure (the pre-flight-plan
-    trap Michelle rejected). One VLM call. Returns {branches, current, most_promising, aligned,
+    trap the agent rejected). One VLM call. Returns {branches, current, most_promising, aligned,
     recommendation}; tolerant parse that FAILS OPEN (aligned=True → no pivot injected)."""
     hist = "\n".join(history[-16:]) if history else "(no actions)"
     sem = (f"\n\nSEMANTIC MAP of the current page:\n{semantic}" if semantic else "")
@@ -196,7 +196,7 @@ async def summarize_done(task: str, history: list[str], image_png: bytes) -> str
 
 
 async def summarize_structured(task: str, history: list[str], image_png: bytes) -> dict:
-    """Structured session result (Michelle's pursue_knowledge-V2 ask #2): return WHAT WAS SOUGHT, WHAT
+    """Structured session result (the pursue_knowledge-V2 ask #2): return WHAT WAS SOUGHT, WHAT
     WAS FOUND, and the GAPS/unconfirmed as JSON — so the calling agent gets a reconciled delta to act on
     instead of prose it must re-synthesise. One call at session end. Tolerant: a non-JSON reply falls
     back to {sought: task, found: <text>, gaps: []} so this never fails the session."""
